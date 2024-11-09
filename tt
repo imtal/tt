@@ -1,0 +1,377 @@
+#!/usr/bin/python3
+
+__version__ = "0.4"
+__license__ = "MIT"
+__copyright__ = "Copyright (c) 2023"
+__author__ = "tjeerd (tjeerd@imtal.nl)"
+__url__ = "https://github.com/imtal/tt"
+__description__ = "Teletext viewer (Dutch NOS pages)"
+
+import os
+import sys
+import urllib.request
+from html.parser import HTMLParser
+import html
+import argparse
+from configparser import ConfigParser
+import re
+import termios
+import select
+
+class Env:
+    ''' Singleton class for environment (globals) '''
+    page = 100           # default page
+    sub = 1              # default subpage
+    output = 'legacy'    # print legacy characters, alternatives are block and braille
+    interactive = False  # interactive mode
+    reload = 0.0         # reload page in interactive mode (0 = never, 5 = five seconds)
+    key = {}             # dict mapping color keys (red, green, yellow, cyan)
+    url = "https://teletekst-data.nos.nl/webplus?p={page}-{sub}"
+    encoding = "latin_1"
+
+ansi_clear = '\033[2J\033[0;0H'
+ansi_home = '\033[0;0H'
+ansi_cursor_show = '\033[?25h'
+ansi_cursor_hide = '\033[?25l'
+ansi_color = {
+    "black": '\033[30m',
+    "red": '\033[31m',
+    "green": '\033[32m',
+    "yellow": '\033[33m',
+    "blue": '\033[34m',
+    "magenta": '\033[35m',
+    "cyan": '\033[36m',
+    "white": '\033[37m',
+    "bg-black": '\033[40m',
+    "bg-red": '\033[41m',
+    "bg-green": '\033[42m',
+    "bg-yellow": '\033[43m',
+    "bg-blue": '\033[44m',
+    "bg-magenta": '\033[45m',
+    "bg-cyan": '\033[46m',
+    "bg-white": '\033[47m',
+}
+ansi_blockchar = {
+    "F020": ' ', # SPACE
+    "F021": u'\u2598', # UPPER LEFT
+    "F022": u'\u259D', # UPPER RIGHT
+    "F023": u'\u2580', # UPPER HALF
+    "F024": u'\u2596', # LOWER LEFT
+    "F025": u'\u258C', # LEFT HALF
+    "F026": u'\u259E', # UPPER RIGHT, LOWER LEFT
+    "F027": u'\u259B', # UPPER LEFT, UPPER RIGHT, LOWER LEFT
+    "F028": u'\u2597', # LOWER RIGHT
+    "F029": u'\u259A', # UPPER LEFT, LOWER RIGHT
+    "F02A": u'\u2590', # RIGHT HALF
+    "F02B": u'\u259C', # UPPER LEFT, UPPER RIGHT, LOWER RIGHT
+    "F02C": u'\u2584', # LOWER HALF
+    "F02D": u'\u2599', # UPPER LEFT, LOWER LEFT, LOWER RIGHT
+    "F02E": u'\u259F', # UPPER RIGHT, LOWER LEFT, LOWER RIGHT
+    "F02F": u'\u2588', # FULL BLOCK
+}
+braille_blockchar = {
+    "F020": u'\u2800', # SPACE
+    "F021": u'\u2801', # UPPER LEFT
+    "F022": u'\u2808', # UPPER RIGHT
+    "F023": u'\u2809', # UPPER HALF
+    "F024": u'\u2802', # LOWER LEFT
+    "F025": u'\u2803', # LEFT HALF
+    "F026": u'\u280A', # UPPER RIGHT, LOWER LEFT
+    "F027": u'\u280B', # UPPER LEFT, UPPER RIGHT, LOWER LEFT
+    "F028": u'\u2810', # LOWER RIGHT
+    "F029": u'\u2811', # UPPER LEFT, LOWER RIGHT
+    "F02A": u'\u2818', # RIGHT HALF
+    "F02B": u'\u2819', # UPPER LEFT, UPPER RIGHT, LOWER RIGHT
+    "F02C": u'\u2812', # LOWER HALF
+    "F02D": u'\u2813', # UPPER LEFT, LOWER LEFT, LOWER RIGHT
+    "F02E": u'\u281A', # UPPER RIGHT, LOWER LEFT, LOWER RIGHT
+    "F02F": u'\u281B', # FULL BLOCK
+
+    "F030": u'\u2844', # SPACE
+    "F031": u'\u2845', # UPPER LEFT
+    "F032": u'\u284C', # UPPER RIGHT
+    "F033": u'\u284D', # UPPER HALF
+    "F034": u'\u2846', # LOWER LEFT
+    "F035": u'\u2847', # LEFT HALF
+    "F036": u'\u284E', # UPPER RIGHT, LOWER LEFT
+    "F037": u'\u284F', # UPPER LEFT, UPPER RIGHT, LOWER LEFT
+    "F038": u'\u2854', # LOWER RIGHT
+    "F039": u'\u2855', # UPPER LEFT, LOWER RIGHT
+    "F03A": u'\u285C', # RIGHT HALF
+    "F03B": u'\u285D', # UPPER LEFT, UPPER RIGHT, LOWER RIGHT
+    "F03C": u'\u2856', # LOWER HALF
+    "F03D": u'\u2857', # UPPER LEFT, LOWER LEFT, LOWER RIGHT
+    "F03E": u'\u285E', # UPPER RIGHT, LOWER LEFT, LOWER RIGHT
+    "F03F": u'\u285F', # FULL BLOCK
+
+    "F060": u'\u28A0', # SPACE
+    "F061": u'\u28A1', # UPPER LEFT
+    "F062": u'\u28A8', # UPPER RIGHT
+    "F063": u'\u28A9', # UPPER HALF
+    "F064": u'\u28A2', # LOWER LEFT
+    "F065": u'\u28A3', # LEFT HALF
+    "F066": u'\u28AA', # UPPER RIGHT, LOWER LEFT
+    "F067": u'\u28AB', # UPPER LEFT, UPPER RIGHT, LOWER LEFT
+    "F068": u'\u28B0', # LOWER RIGHT
+    "F069": u'\u28B1', # UPPER LEFT, LOWER RIGHT
+    "F06A": u'\u28B8', # RIGHT HALF
+    "F06B": u'\u28B9', # UPPER LEFT, UPPER RIGHT, LOWER RIGHT
+    "F06C": u'\u28B2', # LOWER HALF
+    "F06D": u'\u28B3', # UPPER LEFT, LOWER LEFT, LOWER RIGHT
+    "F06E": u'\u28BA', # UPPER RIGHT, LOWER LEFT, LOWER RIGHT
+    "F06F": u'\u28BB', # FULL BLOCK
+
+    "F070": u'\u28E4', # SPACE
+    "F071": u'\u28E5', # UPPER LEFT
+    "F072": u'\u28EC', # UPPER RIGHT
+    "F073": u'\u28ED', # UPPER HALF
+    "F074": u'\u28E6', # LOWER LEFT
+    "F075": u'\u28E7', # LEFT HALF
+    "F076": u'\u28EE', # UPPER RIGHT, LOWER LEFT
+    "F077": u'\u28EF', # UPPER LEFT, UPPER RIGHT, LOWER LEFT
+    "F078": u'\u28F4', # LOWER RIGHT
+    "F079": u'\u28F5', # UPPER LEFT, LOWER RIGHT
+    "F07A": u'\u28FC', # RIGHT HALF
+    "F07B": u'\u28FD', # UPPER LEFT, UPPER RIGHT, LOWER RIGHT
+    "F07C": u'\u28F6', # LOWER HALF
+    "F07D": u'\u28F7', # UPPER LEFT, LOWER LEFT, LOWER RIGHT
+    "F07E": u'\u28FE', # UPPER RIGHT, LOWER LEFT, LOWER RIGHT
+    "F07F": u'\u28FF', # FULL BLOCK
+}
+legacy_blockchar = {
+    "F020": " ", # SPACE
+    "F021": u'\U0001FB00', # UPPER LEFT
+    "F022": u'\U0001FB01', # UPPER RIGHT
+    "F023": u'\U0001FB02', # UPPER HALF
+    "F024": u'\U0001FB03', # LOWER LEFT
+    "F025": u'\U0001FB04', # LEFT HALF
+    "F026": u'\U0001FB05', # UPPER RIGHT, LOWER LEFT
+    "F027": u'\U0001FB06', # UPPER LEFT, UPPER RIGHT, LOWER LEFT
+    "F028": u'\U0001FB07', # LOWER RIGHT
+    "F029": u'\U0001FB08', # UPPER LEFT, LOWER RIGHT
+    "F02A": u'\U0001FB09', # RIGHT HALF
+    "F02B": u'\U0001FB0A', # UPPER LEFT, UPPER RIGHT, LOWER RIGHT
+    "F02C": u'\U0001FB0B', # LOWER HALF
+    "F02D": u'\U0001FB0C', # UPPER LEFT, LOWER LEFT, LOWER RIGHT
+    "F02E": u'\U0001FB0D', # UPPER RIGHT, LOWER LEFT, LOWER RIGHT
+    "F02F": u'\U0001FB0E', # FULL BLOCK
+
+    "F030": u'\U0001FB0F', # SPACE
+    "F031": u'\U0001FB10', # UPPER LEFT
+    "F032": u'\U0001FB11', # UPPER RIGHT
+    "F033": u'\U0001FB12', # UPPER HALF
+    "F034": u'\U0001FB13', # LOWER LEFT
+    "F035": u'\u258C',     # LEFT HALF
+    "F036": u'\U0001FB14', # UPPER RIGHT, LOWER LEFT
+    "F037": u'\U0001FB15', # UPPER LEFT, UPPER RIGHT, LOWER LEFT
+    "F038": u'\U0001FB16', # LOWER RIGHT
+    "F039": u'\U0001FB17', # UPPER LEFT, LOWER RIGHT
+    "F03A": u'\U0001FB18', # RIGHT HALF
+    "F03B": u'\U0001FB19', # UPPER LEFT, UPPER RIGHT, LOWER RIGHT
+    "F03C": u'\U0001FB1A', # LOWER HALF
+    "F03D": u'\U0001FB1B', # UPPER LEFT, LOWER LEFT, LOWER RIGHT
+    "F03E": u'\U0001FB1C', # UPPER RIGHT, LOWER LEFT, LOWER RIGHT
+    "F03F": u'\U0001FB1D', # FULL BLOCK
+
+    "F060": u'\U0001FB1E', # SPACE
+    "F061": u'\U0001FB1F', # UPPER LEFT
+    "F062": u'\U0001FB20', # UPPER RIGHT
+    "F063": u'\U0001FB21', # UPPER HALF
+    "F064": u'\U0001FB22', # LOWER LEFT
+    "F065": u'\U0001FB23', # LEFT HALF
+    "F066": u'\U0001FB24', # UPPER RIGHT, LOWER LEFT
+    "F067": u'\U0001FB25', # UPPER LEFT, UPPER RIGHT, LOWER LEFT
+    "F068": u'\U0001FB26', # LOWER RIGHT
+    "F069": u'\U0001FB27', # UPPER LEFT, LOWER RIGHT
+    "F06A": u'\u2590', # RIGHT HALF
+    "F06B": u'\U0001FB28', # UPPER LEFT, UPPER RIGHT, LOWER RIGHT
+    "F06C": u'\U0001FB29', # LOWER HALF
+    "F06D": u'\U0001FB2A', # UPPER LEFT, LOWER LEFT, LOWER RIGHT
+    "F06E": u'\U0001FB2B', # UPPER RIGHT, LOWER LEFT, LOWER RIGHT
+    "F06F": u'\U0001FB2C', # FULL BLOCK
+
+    "F070": u'\U0001FB2D', # SPACE
+    "F071": u'\U0001FB2E', # UPPER LEFT
+    "F072": u'\U0001FB2F', # UPPER RIGHT
+    "F073": u'\U0001FB30', # UPPER HALF
+    "F074": u'\U0001FB31', # LOWER LEFT
+    "F075": u'\U0001FB32', # LEFT HALF
+    "F076": u'\U0001FB33', # UPPER RIGHT, LOWER LEFT
+    "F077": u'\U0001FB34', # UPPER LEFT, UPPER RIGHT, LOWER LEFT
+    "F078": u'\U0001FB35', # LOWER RIGHT
+    "F079": u'\U0001FB36', # UPPER LEFT, LOWER RIGHT
+    "F07A": u'\U0001FB37', # RIGHT HALF
+    "F07B": u'\U0001FB38', # UPPER LEFT, UPPER RIGHT, LOWER RIGHT
+    "F07C": u'\U0001FB39', # LOWER HALF
+    "F07D": u'\U0001FB3A', # UPPER LEFT, LOWER LEFT, LOWER RIGHT
+    "F07E": u'\U0001FB3B', # UPPER RIGHT, LOWER LEFT, LOWER RIGHT
+    "F07F": u'\u2588', # FULL BLOCK
+}
+
+def set_color(c):
+    if c in ansi_color:
+        sys.stdout.write(ansi_color[c])
+
+class TeletekstParser(HTMLParser):
+
+    in_page = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag=="pre":
+            self.in_page = True
+            env.key = {'red':100,'cyan':100,'yellow':100,'green':100}
+        if not self.in_page:
+           return
+        a = dict(attrs)
+        if "class" in a:
+            colors = a["class"].split()
+            for c in colors:
+                set_color(c)
+        if "id" in a and a["id"][0:8]=="fastText":
+            env.key[a["class"]] = int(a["href"][-3:])
+
+    def handle_endtag(self, tag):
+        if tag=="pre":
+            self.in_page = False
+        if tag=="span":
+            set_color("bg-black")
+            set_color("white")
+
+    def handle_data(self, data):
+        if not self.in_page:
+            return
+        if self.in_page:
+            sys.stdout.write(data)
+
+    def handle_entityref(self,name):
+        if not self.in_page:
+            return
+        str = html.unescape(f'&{name};')
+        sys.stdout.write(str)
+
+    def handle_charref(self,name):
+        if not self.in_page:
+            return
+        key = name[1:].upper()
+        if env.output=='block':
+            # normalize hex code and reduce to only F020-F02F range
+            key = key[0:2]+'2'+key[3].upper()
+            if key in ansi_blockchar:
+                sys.stdout.write(ansi_blockchar[key])
+            else:
+                print(name)
+        elif env.output=='dot':
+            if key in braille_blockchar:
+                sys.stdout.write(braille_blockchar[key])
+        else: # 'legacy'
+            if key in legacy_blockchar:
+                sys.stdout.write(legacy_blockchar[key])
+
+def print_page(p,s):
+    """ Get a HTML page and haul it through the parser """
+    print(" ")
+    req = env.url.format(page = p, sub = s)
+    with urllib.request.urlopen(req) as contents:
+        # meta in HTML is iso8859-1
+        parser.feed(contents.read().decode(env.encoding))
+    print(" ")
+
+def keyboard_loop():
+    c = ''
+    buf = ''
+    running = True
+    print_page(env.page,env.sub)
+    while running:
+        reload = False
+        if env.reload==0 or select.select([fd],[],[],env.reload)[0]:
+            c = sys.stdin.read(1)
+        else:
+            c = ''
+            reload = True
+        if c=='\x03':
+            raise KeyboardInterrupt
+        if c=='q' or c=='Q':
+            running = False
+        if c=='r' or c=='R':
+            env.page = env.key['red']
+            reload = True
+        if c=='c' or c=='C':
+            env.page = env.key['cyan']
+            reload = True
+        if c=='y' or c=='Y':
+            env.page = env.key['yellow']
+            reload = True
+        if c=='g' or c=='G':
+            env.page = env.key['green']
+            reload = True
+        if c>='0' and c<='9':
+            buf += c
+        if c=='\x1b':
+            c += sys.stdin.read(1)
+        if c=='\x1b[':
+            c += sys.stdin.read(1)
+        if c=='\x1b[A': # down
+            env.sub = max(env.sub-1,1)
+            reload = True
+        if c=='\x1b[B': # up
+            env.sub = min(env.sub+1,9)
+            reload = True
+        if len(buf)==3:
+            env.page = int(buf)
+            buf = ''
+            reload = True
+        if reload:
+            sys.stdout.write(ansi_home)
+            print_page(env.page,env.sub)
+
+if __name__ == '__main__':
+    env = Env()
+    if os.path.isfile(os.path.expanduser("~/.config/tt.ini")):
+        config = ConfigParser()
+        config.read(os.path.expanduser("~/.config/tt.ini"))
+        env.interactive = config.getboolean('defaults','interactive',fallback=env.interactive)
+        env.output = config.get('defaults','mode',fallback=env.output)
+        env.page = config.getint('defaults','page',fallback=env.page)
+        env.reload = config.getint('defaults','reload',fallback=env.reload)
+    parser = argparse.ArgumentParser(add_help=False,description=f'{__description__}')
+    parser.add_argument('-v','--version', action='version', help='show version and exit', version=f'{os.path.basename(__file__)} version {__version__} (license: {__license__})')
+    parser.add_argument('-h','--help', action='help', help='show this help message and exit')
+    parser.add_argument('-i','--interactive', action='store_true', help='interactive mode (full screen)')
+    parser.add_argument('-r','--reload', nargs='?', metavar='N', type=int, const='5', help='reload page every N seconds in interactive mode')
+    parser.add_argument('-b','--block', action='store_true', help='use ANSI block characters instead of legacy blockchar')
+    parser.add_argument('-d','--dot', action='store_true', help='use braille characters instead of legacy blockchar')
+    parser.add_argument('page', nargs='?', metavar='PAGE', help='page to view (page or page/subpage)')
+    args = parser.parse_args()
+    if args.page:
+        pattern = re.compile("^([0-9]{3})(/([0-9]))?$")
+        match = pattern.fullmatch(args.page)
+        if match:
+            env.page = match.group(1)
+            env.sub = 1 if not match.group(3) else match.group(3)
+        else:
+            parser.print_usage()
+            exit(f'{env.command}: error: page number not in range 100-999')
+    if args.block:
+        env.output = 'block'
+    if args.dot:
+        env.output = 'dot'
+    parser = TeletekstParser(convert_charrefs=False)
+    if args.interactive:
+        env.interactive = True
+    if not env.interactive:
+        print_page(env.page,env.sub)
+    else:
+        if args.reload:
+            env.reload = float(args.reload)
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        new = termios.tcgetattr(fd)
+        new[3] &= ~(termios.ICANON | termios.ECHO | termios.IGNBRK | termios.BRKINT)
+        sys.stdout.write(ansi_cursor_hide)
+        sys.stdout.write(ansi_clear)
+        try:
+            termios.tcsetattr(fd,termios.TCSAFLUSH,new)
+            keyboard_loop()
+        finally:
+            sys.stdout.write(ansi_cursor_show)
+            termios.tcsetattr(fd,termios.TCSADRAIN,old)
